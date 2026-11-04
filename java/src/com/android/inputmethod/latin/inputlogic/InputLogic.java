@@ -111,6 +111,8 @@ public final class InputLogic {
     // Note: This does not have a composing span, so it must be handled separately.
     private String mWordBeingCorrectedByCursor = null;
 
+    private int mCursorPositionToRestartSuggestionsAt = Constants.NOT_A_CURSOR_POSITION;
+
     /**
      * Create a new instance of the input logic.
      * @param latinIME the instance of the parent LatinIME. We should remove this when we can.
@@ -141,6 +143,7 @@ public final class InputLogic {
     public void startInput(final String combiningSpec, final SettingsValues settingsValues) {
         mEnteredText = null;
         mWordBeingCorrectedByCursor = null;
+        mCursorPositionToRestartSuggestionsAt = Constants.NOT_A_CURSOR_POSITION;
         mConnection.onStartInput();
         if (!mWordComposer.getTypedWord().isEmpty()) {
             // For messaging apps that offer send button, the IME does not get the opportunity
@@ -350,13 +353,28 @@ public final class InputLogic {
      * @param newSelStart new selection start
      * @param newSelEnd new selection end
      * @param settingsValues the current values of the settings.
+     * @param currentKeyboardScriptId the script ID of the current keyboard.
      * @return whether the cursor has moved as a result of user interaction.
      */
     public boolean onUpdateSelection(final int oldSelStart, final int oldSelEnd,
-            final int newSelStart, final int newSelEnd, final SettingsValues settingsValues) {
+            final int newSelStart, final int newSelEnd, final SettingsValues settingsValues,
+            final int currentKeyboardScriptId) {
         if (mConnection.isBelatedExpectedUpdate(oldSelStart, newSelStart, oldSelEnd, newSelEnd)) {
+            final int expectedCursorPosition = mConnection.getExpectedSelectionStart();
+            if (mCursorPositionToRestartSuggestionsAt != expectedCursorPosition) {
+                // We've edited the text since then.
+                mCursorPositionToRestartSuggestionsAt = Constants.NOT_A_CURSOR_POSITION;
+            } else if (Constants.NOT_A_CURSOR_POSITION != expectedCursorPosition
+                    && newSelStart == expectedCursorPosition && newSelEnd == expectedCursorPosition
+                    && !mWordComposer.isComposingWord()
+                    && mConnection.reloadTextCacheAtExpectedCursor()) {
+                // Not posted, so that no other event can start composing first.
+                restartSuggestionsOnWordTouchedByCursor(settingsValues, false /* forStartInput */,
+                        currentKeyboardScriptId);
+            }
             return false;
         }
+        mCursorPositionToRestartSuggestionsAt = Constants.NOT_A_CURSOR_POSITION;
         // TODO: the following is probably better done in resetEntireInputState().
         // it should only happen when the cursor moved, and the very purpose of the
         // test below is to narrow down whether this happened or not. Likewise with
@@ -1524,6 +1542,7 @@ public final class InputLogic {
             final boolean forStartInput,
             // TODO: remove this argument, put it into settingsValues
             final int currentKeyboardScriptId) {
+        mCursorPositionToRestartSuggestionsAt = Constants.NOT_A_CURSOR_POSITION;
         // HACK: We may want to special-case some apps that exhibit bad behavior in case of
         // recorrection. This is a temporary, stopgap measure that will be removed later.
         // TODO: remove this.
@@ -1554,7 +1573,11 @@ public final class InputLogic {
         }
         final TextRange range = mConnection.getWordRangeAtCursor(
                 settingsValues.mSpacingAndPunctuations, currentKeyboardScriptId);
-        if (null == range) return; // Happens if we don't have an input connection at all
+        if (null == range) {
+            // No input connection, or the editor's text doesn't match ours yet.
+            mCursorPositionToRestartSuggestionsAt = expectedCursorPosition;
+            return;
+        }
         if (range.length() <= 0) {
             // Race condition, or touching a word in a non-supported script.
             mLatinIME.setNeutralSuggestionStrip();

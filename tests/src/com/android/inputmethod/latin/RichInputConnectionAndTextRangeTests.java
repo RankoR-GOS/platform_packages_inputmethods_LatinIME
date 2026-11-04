@@ -18,6 +18,7 @@ package com.android.inputmethod.latin;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import android.content.res.Resources;
@@ -142,6 +143,11 @@ public class RichInputConnectionAndTextRangeTests {
 
         @Override
         public boolean finishComposingText() {
+            return true;
+        }
+
+        @Override
+        public boolean deleteSurroundingText(int beforeLength, int afterLength) {
             return true;
         }
     }
@@ -288,6 +294,63 @@ public class RichInputConnectionAndTextRangeTests {
         r = ic.getWordRangeAtCursor(SUPPLEMENTARY_CHAR, ScriptUtils.SCRIPT_GREEK);
         ic.endBatchEdit();
         assertTrue(TextUtils.equals(GREEK_WORD, r.mWord));
+    }
+
+    @Test
+    public void testGetWordRangeAtCursorAfterDeletion() {
+        final MockInputMethodService ims = new MockInputMethodService();
+        final RichInputConnection ic = new RichInputConnection(ims);
+        ims.setInputConnection(new MockConnection("one two ", "", null));
+        ic.resetCachesUponCursorMoveAndReturnSuccess(8, 8, false);
+        ic.deleteTextBeforeCursor(1);
+
+        // The editor hasn't applied the deletion yet.
+        assertNull(ic.getWordRangeAtCursor(mSpacingAndPunctuations, ScriptUtils.SCRIPT_LATIN));
+
+        ims.setInputConnection(new MockConnection("one two", "", null));
+        assertEquals("two", ic.getWordRangeAtCursor(
+                mSpacingAndPunctuations, ScriptUtils.SCRIPT_LATIN).mWord.toString());
+
+        // Editors may return less text than requested.
+        ims.setInputConnection(new MockConnection(" two", "", null));
+        assertEquals("two", ic.getWordRangeAtCursor(
+                mSpacingAndPunctuations, ScriptUtils.SCRIPT_LATIN).mWord.toString());
+    }
+
+    @Test
+    public void testGetWordRangeAtCursorAfterDeletingRepeatedChar() {
+        final MockInputMethodService ims = new MockInputMethodService();
+        final RichInputConnection ic = new RichInputConnection(ims);
+        ims.setInputConnection(new MockConnection("aaa", "", null));
+        ic.resetCachesUponCursorMoveAndReturnSuccess(3, 3, false);
+        ic.deleteTextBeforeCursor(1);
+
+        // The editor hasn't applied the deletion yet.
+        assertNull(ic.getWordRangeAtCursor(mSpacingAndPunctuations, ScriptUtils.SCRIPT_LATIN));
+
+        ims.setInputConnection(new MockConnection("aa", "", null));
+        assertEquals("aa", ic.getWordRangeAtCursor(
+                mSpacingAndPunctuations, ScriptUtils.SCRIPT_LATIN).mWord.toString());
+    }
+
+    @Test
+    public void testReloadTextCacheAtExpectedCursor() {
+        final MockInputMethodService ims = new MockInputMethodService();
+        final RichInputConnection ic = new RichInputConnection(ims);
+        ims.setInputConnection(new MockConnection("one two ", "", null));
+        ic.resetCachesUponCursorMoveAndReturnSuccess(8, 8, false);
+        ic.deleteTextBeforeCursor(1);
+
+        // The editor hasn't applied the deletion yet.
+        assertFalse(ic.reloadTextCacheAtExpectedCursor());
+        assertNull(ic.getWordRangeAtCursor(mSpacingAndPunctuations, ScriptUtils.SCRIPT_LATIN));
+
+        // The editor applied the deletion to text it had changed.
+        ims.setInputConnection(new MockConnection("ONE TWO", "", null));
+        assertNull(ic.getWordRangeAtCursor(mSpacingAndPunctuations, ScriptUtils.SCRIPT_LATIN));
+        assertTrue(ic.reloadTextCacheAtExpectedCursor());
+        assertEquals("TWO", ic.getWordRangeAtCursor(
+                mSpacingAndPunctuations, ScriptUtils.SCRIPT_LATIN).mWord.toString());
     }
 
     /**

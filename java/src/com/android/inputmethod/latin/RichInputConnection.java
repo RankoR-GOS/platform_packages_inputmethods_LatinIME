@@ -272,6 +272,28 @@ public final class RichInputConnection implements PrivateCommandPerformer {
         return true;
     }
 
+    /**
+     * Reload the cached text once the editor has reported the expected cursor position. Editors
+     * may change the text we send, for example with {@link android.text.InputFilter.AllCaps}.
+     *
+     * @return false if we can't reach the editor, or if it has more text before the cursor than
+     *   we expect because it hasn't applied all of our edits yet
+     */
+    public boolean reloadTextCacheAtExpectedCursor() {
+        final CharSequence textBeforeCursor = getTextBeforeCursorAndDetectLaggyConnection(
+                OPERATION_RELOAD_TEXT_CACHE,
+                SLOW_INPUT_CONNECTION_ON_FULL_RELOAD_MS,
+                Constants.EDITOR_CONTENTS_CACHE_SIZE,
+                0 /* flags */);
+        if (null == textBeforeCursor || textBeforeCursor.length() > mExpectedSelStart) {
+            return false;
+        }
+        mComposingText.setLength(0);
+        mCommittedTextBeforeComposingText.setLength(0);
+        mCommittedTextBeforeComposingText.append(textBeforeCursor);
+        return true;
+    }
+
     private void checkBatchEdit() {
         if (mNestLevel != 1) {
             // TODO: exception instead
@@ -712,7 +734,8 @@ public final class RichInputConnection implements PrivateCommandPerformer {
      *
      * @param spacingAndPunctuations the rules for spacing and punctuation
      * @param scriptId the script we consider to be writing words, as one of ScriptUtils.SCRIPT_*
-     * @return a range containing the text surrounding the cursor
+     * @return a range containing the text surrounding the cursor, or null if there is no input
+     *   connection or the editor's text doesn't match the cache
      */
     public TextRange getWordRangeAtCursor(final SpacingAndPunctuations spacingAndPunctuations,
             final int scriptId) {
@@ -731,6 +754,10 @@ public final class RichInputConnection implements PrivateCommandPerformer {
                 NUM_CHARS_TO_GET_AFTER_CURSOR,
                 InputConnection.GET_TEXT_WITH_STYLES);
         if (before == null || after == null) {
+            return null;
+        }
+        // Some editors, such as Compose text fields, apply our edits late.
+        if (!isTextBeforeCursorConsistentWithCache(before)) {
             return null;
         }
 
@@ -769,6 +796,31 @@ public final class RichInputConnection implements PrivateCommandPerformer {
                 SpannableStringUtils.concatWithNonParagraphSuggestionSpansOnly(before, after),
                         startIndexInBefore, before.length() + endIndexInAfter, before.length(),
                         hasUrlSpans);
+    }
+
+    private boolean isTextBeforeCursorConsistentWithCache(final CharSequence textBeforeCursor) {
+        final int committedLength = mCommittedTextBeforeComposingText.length();
+        final int cachedLength = committedLength + mComposingText.length();
+        if (cachedLength == 0 || INVALID_CURSOR_POSITION == mExpectedSelStart) {
+            return true;
+        }
+        final int editorLength = textBeforeCursor.length();
+        // When we have all text before the cursor, the editor can't have more. Comparing the ends
+        // alone misses "aaa" against "aa".
+        if (cachedLength >= mExpectedSelStart && cachedLength < editorLength) {
+            return false;
+        }
+        final int length = Math.min(editorLength, cachedLength);
+        for (int i = 1; i <= length; ++i) {
+            final int cachedIndex = cachedLength - i;
+            final char cachedChar = cachedIndex >= committedLength
+                    ? mComposingText.charAt(cachedIndex - committedLength)
+                    : mCommittedTextBeforeComposingText.charAt(cachedIndex);
+            if (cachedChar != textBeforeCursor.charAt(editorLength - i)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     public boolean isCursorTouchingWord(final SpacingAndPunctuations spacingAndPunctuations,

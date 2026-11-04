@@ -1183,7 +1183,8 @@ public class LatinIME extends InputMethodService implements KeyboardActionListen
         boolean cursorMovedByUser = false;
         if (isInputViewShown()) {
             cursorMovedByUser = mInputLogic.onUpdateSelection(
-                    oldSelStart, oldSelEnd, newSelStart, newSelEnd, settingsValues);
+                    oldSelStart, oldSelEnd, newSelStart, newSelEnd, settingsValues,
+                    mKeyboardSwitcher.getCurrentKeyboardScriptId());
             if (cursorMovedByUser) {
                 mKeyboardSwitcher.requestUpdatingShiftState(getCurrentAutoCapsState(),
                         getCurrentRecapitalizeState());

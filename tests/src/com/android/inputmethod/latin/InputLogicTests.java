@@ -18,8 +18,12 @@ package com.android.inputmethod.latin;
 
 import static android.test.MoreAsserts.assertNotEqual;
 
+import android.text.InputFilter;
 import android.text.TextUtils;
 import android.view.inputmethod.BaseInputConnection;
+import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputConnection;
+import android.view.inputmethod.InputConnectionWrapper;
 
 import androidx.test.filters.LargeTest;
 
@@ -458,6 +462,163 @@ public class InputLogicTests extends InputTestsBase {
                 BaseInputConnection.getComposingSpanStart(mEditText.getText()));
         assertEquals("resume suggestion on backspace", 8,
                 BaseInputConnection.getComposingSpanEnd(mEditText.getText()));
+    }
+
+    private static final class LaggingInputConnection extends InputConnectionWrapper {
+        boolean mLagging;
+        private int mPendingDeletion;
+
+        LaggingInputConnection(final InputConnection target) {
+            super(target, false /* mutable */);
+        }
+
+        @Override
+        public boolean deleteSurroundingText(final int beforeLength, final int afterLength) {
+            if (!mLagging) {
+                return super.deleteSurroundingText(beforeLength, afterLength);
+            }
+            mPendingDeletion += beforeLength;
+            return true;
+        }
+
+        void catchUp() {
+            mLagging = false;
+            super.deleteSurroundingText(mPendingDeletion, 0);
+            mPendingDeletion = 0;
+        }
+    }
+
+    // Like Compose text fields, returns the text from before the current batch edit.
+    private static final class StaleInputConnection extends InputConnectionWrapper {
+        boolean mStale;
+        private int mBatchEditNestLevel;
+        private CharSequence mTextBeforeBatchEdit;
+
+        StaleInputConnection(final InputConnection target) {
+            super(target, false /* mutable */);
+        }
+
+        @Override
+        public boolean beginBatchEdit() {
+            if (mBatchEditNestLevel++ == 0) {
+                mTextBeforeBatchEdit = super.getTextBeforeCursor(Integer.MAX_VALUE,
+                        InputConnection.GET_TEXT_WITH_STYLES);
+            }
+            return super.beginBatchEdit();
+        }
+
+        @Override
+        public boolean endBatchEdit() {
+            mBatchEditNestLevel--;
+            return super.endBatchEdit();
+        }
+
+        @Override
+        public CharSequence getTextBeforeCursor(final int n, final int flags) {
+            if (!mStale || mBatchEditNestLevel == 0) {
+                return super.getTextBeforeCursor(n, flags);
+            }
+            final int length = mTextBeforeBatchEdit.length();
+            return mTextBeforeBatchEdit.subSequence(Math.max(0, length - n), length);
+        }
+    }
+
+    private void startInputWith(final InputConnection ic, final EditorInfo ei) {
+        mLatinIME.onCreateInputMethodInterface().startInput(ic, enrichEditorInfo(ei));
+        mLatinIME.onStartInputView(ei, false);
+        mInputConnection = ic;
+        sleep(DELAY_TO_WAIT_FOR_PREDICTIONS_MILLIS);
+        runMessages();
+    }
+
+    public void testBackspaceWithStaleEditorKeepsSpace() {
+        final EditorInfo ei = new EditorInfo();
+        final StaleInputConnection ic =
+                new StaleInputConnection(mEditText.onCreateInputConnection(ei));
+        startInputWith(ic, ei);
+        type("one two ");
+        sendUpdateForCursorMoveTo(8);
+        ic.mStale = true;
+        type(Constants.CODE_DELETE);
+        type(Constants.CODE_DELETE);
+        type(Constants.CODE_DELETE);
+        assertEquals("backspace with stale editor", "one t", mEditText.getText().toString());
+    }
+
+    public void testNoResumeSuggestionOnStaleRetryAfterTextInput() {
+        final EditorInfo ei = new EditorInfo();
+        final StaleInputConnection ic =
+                new StaleInputConnection(mEditText.onCreateInputConnection(ei));
+        startInputWith(ic, ei);
+        type("one two ");
+        sendUpdateForCursorMoveTo(8);
+        ic.mStale = true;
+        type(Constants.CODE_DELETE);
+        ic.mStale = false;
+        mLatinIME.onTextInput(":-)");
+        mLatinIME.mInputLogic.onUpdateSelection(8, 8, 10, 10, mLatinIME.mSettings.getCurrent(),
+                mLatinIME.mKeyboardSwitcher.getCurrentKeyboardScriptId());
+        // Removes the smiley without resuming suggestions.
+        type(Constants.CODE_DELETE);
+        mLatinIME.mInputLogic.onUpdateSelection(10, 10, 7, 7, mLatinIME.mSettings.getCurrent(),
+                mLatinIME.mKeyboardSwitcher.getCurrentKeyboardScriptId());
+        assertEquals("no stale retry after text input", "one two",
+                mEditText.getText().toString());
+        assertEquals("no stale retry after text input", -1,
+                BaseInputConnection.getComposingSpanStart(mEditText.getText()));
+    }
+
+    public void testResumeSuggestionOnBackspaceWithLaggingEditor() {
+        final EditorInfo ei = new EditorInfo();
+        final LaggingInputConnection ic =
+                new LaggingInputConnection(mEditText.onCreateInputConnection(ei));
+        startInputWith(ic, ei);
+
+        // With "@" before the word, resuming it again while composing duplicates it.
+        final String STRING_TO_TYPE = "and @this ";
+        final int typedLength = STRING_TO_TYPE.length();
+        type(STRING_TO_TYPE);
+        sendUpdateForCursorMoveTo(typedLength);
+        ic.mLagging = true;
+        type(Constants.CODE_DELETE);
+        ic.catchUp();
+        // LatinIME#onUpdateSelection ignores updates without a visible input view.
+        mLatinIME.mInputLogic.onUpdateSelection(typedLength, typedLength, typedLength - 1,
+                typedLength - 1, mLatinIME.mSettings.getCurrent(),
+                mLatinIME.mKeyboardSwitcher.getCurrentKeyboardScriptId());
+        // Runs before any message the update posted.
+        type(Constants.CODE_DELETE);
+        runMessages();
+        type('x');
+        assertEquals("resume suggestion with lagging editor", "and @thix",
+                mEditText.getText().toString());
+        assertEquals("resume suggestion with lagging editor", 5,
+                BaseInputConnection.getComposingSpanStart(mEditText.getText()));
+        assertEquals("resume suggestion with lagging editor", 9,
+                BaseInputConnection.getComposingSpanEnd(mEditText.getText()));
+        assertEquals("resume suggestion with lagging editor", 9,
+                mLatinIME.mInputLogic.mConnection.getExpectedSelectionStart());
+    }
+
+    public void testResumeSuggestionOnBackspaceWithTransformingEditor() {
+        mEditText.setFilters(new InputFilter[] { new InputFilter.AllCaps() });
+        final String STRING_TO_TYPE = "one two ";
+        final int typedLength = STRING_TO_TYPE.length();
+        type(STRING_TO_TYPE);
+        sendUpdateForCursorMoveTo(typedLength);
+        type(Constants.CODE_DELETE);
+        mLatinIME.mInputLogic.onUpdateSelection(typedLength, typedLength, typedLength - 1,
+                typedLength - 1, mLatinIME.mSettings.getCurrent(),
+                mLatinIME.mKeyboardSwitcher.getCurrentKeyboardScriptId());
+        assertEquals("resume suggestion with transforming editor", 4,
+                BaseInputConnection.getComposingSpanStart(mEditText.getText()));
+        assertEquals("resume suggestion with transforming editor", 7,
+                BaseInputConnection.getComposingSpanEnd(mEditText.getText()));
+        type('x');
+        assertEquals("resume suggestion with transforming editor", "ONE TWOX",
+                mEditText.getText().toString());
+        assertEquals("resume suggestion with transforming editor", 8,
+                mLatinIME.mInputLogic.mConnection.getExpectedSelectionStart());
     }
 
     private void helperTestComposing(final String wordToType, final boolean shouldBeComposing) {
